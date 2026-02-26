@@ -1,1021 +1,626 @@
-# -*- coding: utf-8 -*-
-"""
-@author: Michael Krieger (lapmk)
-"""
-
 import numpy as np
-import elabapi_python
 import pandas as pd
 import json
 import h5py
 import tempfile
 import os
-import time
 from matplotlib.figure import Figure
 from io import StringIO, BytesIO
 from pathlib import Path
 from datetime import datetime, date as dt_date, time as dt_time
 from ipylab import JupyterFrontEnd
 import asyncio
+import requests
+from typing import Any, Dict, List, Optional, Union, Tuple
+
+import re
+import time
 
 
-__APICLIENT__ = None
-__EXPID__ = None
+__SESSION__: Optional[requests.Session] = None
+__BASEURL__: Optional[str] = None  
+__VERIFY_SSL__: bool = True
+__EXPID__: Optional[int] = None
 
 __APP__ = JupyterFrontEnd()
 
 
-### General functions ###
+# -----------------------
+# Low-level HTTP helpers
+# -----------------------
+
+class ElabAPIError(RuntimeError):
+    pass
 
 
-def connect(host: str, apikey: str, verify_ssl: bool=True):
-    """Connect to eLabFTW server API.
-    
-    Parameters
-    ----------
-    host : str
-        URL to V2 api on the eLabFTW server, 
-        e.g. https://server/api/v2.
-    apikey : str
-        API key to be used in order to access the eLabFTW data.
-    verify_ssl : bool, optional
-        If True, SSL certificates are verified.
+def _normalize_baseurl(host: str) -> str:
+    host = host.strip()
+    if host.endswith("/"):
+        host = host[:-1]
+    if "/api/v2" in host:
+        return host
+    return host + "/api/v2"
 
-    Returns
-    -------
-    None.
 
+def _require_connected() -> Tuple[requests.Session, str]:
+    if __SESSION__ is None or __BASEURL__ is None:
+        raise RuntimeError("Not connected to eLabFTW server")
+    return __SESSION__, __BASEURL__
+
+
+def _request(
+    method: str,
+    path: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    files: Optional[Dict[str, Any]] = None,
+    stream: bool = False,
+    timeout: Union[float, Tuple[float, float]] = (10.0, 120.0),
+) -> requests.Response:
+    sess, base = _require_connected()
+    url = f"{base}{path}"
+
+    try:
+        r = sess.request(
+            method=method.upper(),
+            url=url,
+            params=params,
+            json=json_body,
+            data=data,
+            files=files,
+            stream=stream,
+            timeout=timeout,
+            verify=__VERIFY_SSL__,
+        )
+    except requests.RequestException as e:
+        raise ElabAPIError(f"HTTP request failed: {method} {url}: {e}") from e
+
+    if not r.ok:
+        # Try to include server JSON error if present
+        msg = f"API error {r.status_code} for {method} {url}"
+        try:
+            payload = r.json()
+            msg += f": {payload}"
+        except Exception:
+            txt = (r.text or "").strip()
+            if txt:
+                msg += f": {txt}"
+        raise ElabAPIError(msg)
+
+    return r
+
+
+def _get_json(path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
+    r = _request("GET", path, params=params, stream=False)
+    if r.status_code == 204:
+        return None
+    return r.json()
+
+
+def _patch_json(path: str, body: Dict[str, Any]) -> Any:
+    r = _request("PATCH", path, json_body=body, stream=False)
+    if r.status_code == 204:
+        return None
+    return r.json()
+
+
+# -----------------------
+# General functions
+# -----------------------
+
+def connect(host: str, apikey: str, verify_ssl: bool = True):
+    """Connect to eLabFTW server API v2.
+    host: base instance URL or full .../api/v2
+    apikey: API key
     """
-    
-    global __APICLIENT__
-    
-    # configure elabftw access
-    conf = elabapi_python.Configuration()
-    conf.api_key['api_key'] = apikey
-    conf.api_key_prefix['api_key'] = 'Authorization'
-    if 'api' in host:
-        conf.host = host
-    else:
-        if host[-1] == '/':
-            conf.host = host + 'api/v2'
-        else:
-            conf.host = host + '/api/v2'
-    conf.debug = False
-    conf.verify_ssl = verify_ssl
-    
-    # connect to api
-    __APICLIENT__ = elabapi_python.ApiClient(conf)
-    __APICLIENT__.set_default_header(header_name='Authorization', 
-                                     header_value=apikey)
-    
-    
+    global __SESSION__, __BASEURL__, __VERIFY_SSL__
+    __VERIFY_SSL__ = verify_ssl
+    __BASEURL__ = _normalize_baseurl(host)
+
+    s = requests.Session()
+    # eLabFTW expects API key in Authorization header
+    s.headers.update(
+        {
+            "Authorization": apikey,
+            "Accept": "application/json",
+        }
+    )
+    __SESSION__ = s
+
+
 def disconnect():
-    """Disconnect from the eLabFTW server API
-    
-    Returns
-    -------
-    None.
-
-    """
-    
-    global __APICLIENT__
-    __APICLIENT__ = None
+    global __SESSION__, __BASEURL__
+    if __SESSION__ is not None:
+        __SESSION__.close()
+    __SESSION__ = None
+    __BASEURL__ = None
 
 
-def get_teamid():
-    """Return the team id associated with the api key used.
-
-    Returns
-    -------
-    The team id associated with the api key used.
-
-    """
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    teams_api = elabapi_python.TeamsApi(__APICLIENT__)
-    return teams_api.read_team('current').id
+def get_teamid() -> int:
+    """Return the team id associated with the api key used."""
+    team = _get_json("/teams/current")  # id can be "current" per API :contentReference[oaicite:4]{index=4}
+    return int(team["id"])
 
 
-def list_experiments(searchstring: str='', tags=[], only_current_team: bool=True,
-                     list_keys=['id']):
-    """Return a list of all experiments within the team associated 
-    with the api key used that contain searchstring
-    in title, body or elabid and that match the tags.
+def list_experiments(
+    searchstring: str = "",
+    tags: List[str] = [],
+    only_current_team: bool = True,
+    list_keys: List[str] = ["id"],
+) -> List[Any]:
+    """Return a list of experiments matching searchstring and tags."""
+    # API uses tags[] parameter in docs; requests supports list values
+    # Many servers accept either "tags[]" or "tags" – we send "tags[]" explicitly.
+    params: List[Tuple[str, Any]] = [("q", searchstring), ("limit", 9999)]
+    for t in tags:
+        params.append(("tags[]", t))
 
-    Parameters
-    ----------
-    searchstring: str, optional
-        A string that needs to be contained in the title, body or elabid
-        of the experiments.
-        The default is ''.
-    tags : list, optional
-        A list of tags for which experiments should be searched.
-        The default is an empty list.
-    only_current_team : bool, optional
-        If True, only experiments from the current team will be listed.
-        The default is True.
-    list_keys : list, optional
-        A list of keys to include in the returned experiment data.
-        The default is ['id'].
+    exps = _get_json("/experiments", params=dict(params))  # may flatten duplicates on dict
+    # If your server requires repeated tags[] keys, use params as list of tuples:
+    # exps = _request("GET", "/experiments", params=params).json()
 
-    Returns
-    -------
-    A list of experiment ids that match the tags.
-
-    """
-
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-
-    exps = exp_api.read_experiments(q=searchstring, tags=tags, limit=9999)
-    
     teamid = get_teamid()
     explist = []
     for exp in exps:
-        if exp.team == teamid or not only_current_team:
+        if (int(exp.get("team", -1)) == teamid) or (not only_current_team):
             if len(list_keys) == 1:
-                explist.append(getattr(exp, list_keys[0]))
+                explist.append(exp.get(list_keys[0]))
             else:
-                expdata = {}
-                for key in list_keys:
-                    expdata[key] = getattr(exp, key)
+                expdata = {key: exp.get(key) for key in list_keys}
                 explist.append(expdata)
     return explist
 
 
-def open_experiment(expid: int, returndata: bool=False):
-    """Open an experiment on eLabFTW.
-    This experiment will be used for all subsequent commands 
-    (unless otherwise specified.)
-
-    Parameters
-    ----------
-    expid : int
-        The id of the experiment in eLabFTW to be read.
-    returndata : bool, optional
-        If True, open_experiment will return a dictionary containing
-        the experiment's metadata.
-        The default is False
-
-    Returns
-    -------
-    None.
-
-    """
-
-    global __APICLIENT__
+def open_experiment(expid: int, returndata: bool = False):
+    """Open an experiment on eLabFTW (sets global __EXPID__)."""
     global __EXPID__
     __EXPID__ = expid
-    
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-    
-    # fetch experiment
-    exp = exp_api.get_experiment(__EXPID__)
+    exp = _get_json(f"/experiments/{expid}")
     if returndata:
         return exp
 
 
 def close_experiment():
-    """Close experiment.
-    Subsequent commands will not further operate on the experiment.
-    
-    Returns
-    -------
-    None.
-
-    """
-
     global __EXPID__
     __EXPID__ = None
 
 
-### Read experiment data ###    
-    
-    
+# -----------------------
+# Read experiment data
+# -----------------------
+
 def __conv_df_to_np(df: pd.DataFrame) -> dict:
-    """Convert a pandas dataframe to a dictionary of numpy arrays
-    for each column with keys corresponding to the column headings.
-    In case of duplicate column headings, a consecutive number is
-    appended.
-
-    Parameters
-    ----------
-    df : pandas.dataframe
-        The dataframe to be converted.
-        
-    Returns
-    -------
-    dictionary
-        A dictionary of numpy arrays for each column of the parameter df
-
-    """
-
     data = {}
     for name, column in df.items():
+        base = name
         cno = 0
         while name in data.keys():
             cno += 1
-            name = name + '_' + str(cno)
+            name = f"{base}_{cno}"
         data[name] = np.array(column.to_numpy(), dtype=float)
     return data
 
 
-def get_experimentdata(expid: int=None):
-    """Read and return the record of an experiment
-    stored in eLabFTW.
-    
-    Parameters
-    ----------
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-
-    Returns
-    -------
-    dictionary
-        Returns the experiment data
-
-    """
-
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-    
+def get_experimentdata(expid: int = None) -> Dict[str, Any]:
     if expid is None:
         global __EXPID__
         expid = __EXPID__
-
     if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-   
-    # fetch experiment
-    return exp_api.get_experiment(expid)
+        raise RuntimeError("No experiment opened or specified")
+    return _get_json(f"/experiments/{expid}")
 
 
-def get_maintext(format: str='html', expid: int=None):
-    """Read and return the main (or body) text of an experiment
-    stored in eLabFTW.
-    
-    Parameters
-    ----------
-    format: str, optional
-        If format is 'html', the content of body_html of the experiment
-        is returned, otherwise the content of body.
-        The default is 'html'.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-
-    Returns
-    -------
-    str
-        Returns the main (or body) text
-
-    """
-
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-    
-    if expid is None:
-        global __EXPID__
-        expid = __EXPID__
-
-    if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-   
-    # fetch experiment
-    exp = exp_api.get_experiment(expid)
-    
-    if format == 'html':
-        return exp.body_html
-    else:
-        return exp.body
+def get_maintext(format: str = "html", expid: int = None) -> str:
+    exp = get_experimentdata(expid)
+    if format == "html":
+        return exp.get("body_html") or ""
+    return exp.get("body") or ""
 
 
-def get_table_data(tableidx: int=0, header: bool=True, 
-                   decimal: str='.', thousands: str=None,
-                   datatype: str='np', expid: int=None):   
-    """Read and return table data from the body text of an experiment 
-    stored in eLabFTW.
+def get_table_data(
+    tableidx: int = 0,
+    header: bool = True,
+    decimal: str = ".",
+    thousands: str = None,
+    datatype: str = "np",
+    expid: int = None,
+):
+    exp = get_experimentdata(expid)
 
-    Parameters
-    ----------
-    tableidx : int, optional
-        The index of the table to be read; first table has index 0. 
-        The default is 0.
-    header : bool, optional
-        If True, the first table row contains the column names, which
-        are used as headings for the pandas dataframe. 
-        The default is True.
-    decimal: str, optional
-        Character representing the decimal point.
-        The default is '.'.
-    thousands: str, optional
-        Character used to parse thousands.
-        If None, ',' or '.' is used if decimal is '.' or ',', respectively.
-        The default is None.
-    datatype : str, optional
-        'df': return a pandas dataframe,
-        'np': return a dictionary of numpy arrays for each column. 
-        The default is 'np'.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-
-    Returns
-    -------
-    pandas.dataframe or dictionary
-        Return type depends on the parameter datatype (see above).
-
-    """
-    
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-    
-    if expid is None:
-        global __EXPID__
-        expid = __EXPID__
-
-    if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-   
-    # fetch experiment
-    exp = exp_api.get_experiment(expid)
-    
-    # extract table
     if thousands is None:
-        thousands = '.' if decimal==',' else ','
-    tables = pd.read_html(StringIO(exp.body_html), decimal=decimal, thousands=thousands)
-    
-    # extract selected table and assign header if requested
+        thousands = "." if decimal == "," else ","
+
+    tables = pd.read_html(StringIO(exp.get("body_html") or ""), decimal=decimal, thousands=thousands)
+
     if header:
         table = tables[tableidx].iloc[1:]
         table.columns = tables[tableidx].iloc[0]
     else:
         table = tables[tableidx]
-        
-    # return result
-    if datatype == 'df':
+
+    if datatype == "df":
         return table
-    elif datatype == 'np':
+    if datatype == "np":
         return __conv_df_to_np(table)
-    else:
-        raise RuntimeError('Wrong datatype')
+    raise RuntimeError("Wrong datatype")
 
-        
-def get_extrafields(fieldname: str=None, expid: int=None):
-    """Read and return the extra fields of an experiment
-    stored in eLabFTW.
-    
-    Parameters
-    ----------
-    fieldname: str, optional
-        If fieldname is None, a dictionary of all extra fields is returned,
-        otherwise the value of the field specified.
-        The default is None.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
 
-    Returns
-    -------
-    str or dictionary
-        Returns either the value of the field specified or a dictionary
-        of all extra fields.
+def get_extrafields(fieldname: str = None, expid: int = None):
+    exp = get_experimentdata(expid)
+    md_raw = exp.get("metadata") or "{}"
+    data = json.loads(md_raw).get("extra_fields", {})
 
-    """
-
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-    
-    if expid is None:
-        global __EXPID__
-        expid = __EXPID__
-
-    if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-   
-    # fetch experiment
-    exp = exp_api.get_experiment(expid)
-    
-    data = json.loads(exp.metadata)['extra_fields']
     if fieldname is None:
         return data
-    else:
-        value = data[fieldname]['value']
-        if data[fieldname]['type'] == 'number':
-            return float(value)
-        if data[fieldname]['type'] == 'datetime-local':
-            return datetime.fromisoformat(value)
-        if data[fieldname]['type'] == 'date':
-            return dt_date.fromisoformat(value)
-        if data[fieldname]['type'] == 'time':
-            return dt_time.fromisoformat(value)
-        else:
-            return value
 
-        
-### Read files ###    
-    
-    
-def __get_upload_id(expid: int, filename: str):
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    uploads_api = elabapi_python.UploadsApi(__APICLIENT__)
+    value = data[fieldname]["value"]
+    ftype = data[fieldname].get("type", "text")
+    if ftype == "number":
+        return float(value)
+    if ftype == "datetime-local":
+        return datetime.fromisoformat(value)
+    if ftype == "date":
+        return dt_date.fromisoformat(value)
+    if ftype == "time":
+        return dt_time.fromisoformat(value)
+    return value
 
-    # fetch metadata of all uploads and search for filename
-    uploads = uploads_api.read_uploads('experiments', expid)
-    uploadid = None
+
+# -----------------------
+# Read files (uploads)
+# -----------------------
+
+def __read_uploads(expid: int) -> List[Dict[str, Any]]:
+    # Endpoint: /{entity_type}/{id}/uploads :contentReference[oaicite:5]{index=5}
+    return _get_json(f"/experiments/{expid}/uploads")
+
+
+def __get_upload_id(expid: int, filename: str) -> Optional[int]:
+    uploads = __read_uploads(expid)
     for upload in uploads:
-        if upload.real_name == filename:
-            uploadid = upload.id
-            break   
-    return uploadid
+        if upload.get("real_name") == filename:
+            return int(upload["id"])
+    return None
 
 
-def __get_upload_id_by_long_name(expid: int, long_name: str):
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    uploads_api = elabapi_python.UploadsApi(__APICLIENT__)
-
-    # fetch metadata of all uploads and search for filename
-    uploads = uploads_api.read_uploads('experiments', expid)
-    uploadid = None
+def __get_upload_id_by_long_name(expid: int, long_name: str) -> Optional[int]:
+    uploads = __read_uploads(expid)
     for upload in uploads:
-        if upload.long_name == long_name:
-            uploadid = upload.id
-            break   
-    return uploadid
+        if upload.get("long_name") == long_name:
+            return int(upload["id"])
+    return None
 
 
-def get_file_data(filename: str, filename_is_long_name: bool=False, expid: int=None):   
-    """Read and return binary data from a file attached to 
-    an experiment stored in eLabFTW.
-
-    Parameters
-    ----------
-    filename : str
-        The filename of the file to be read from the experiment.
-    filename_is_long_name: bool
-        The value of filename is the long_name stored used in eLabFTW.
-        The default is False.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-
-    Returns
-    -------
-    bytes
-        Returns the binary data of the specified file.
-
-    """
-
-    global __APICLIENT__   
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    uploads_api = elabapi_python.UploadsApi(__APICLIENT__)
-    
+def get_file_data(filename: str, filename_is_long_name: bool = False, expid: int = None) -> bytes:
     if expid is None:
         global __EXPID__
         expid = __EXPID__
-
     if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-    
-    if filename_is_long_name:
-        uploadid = __get_upload_id_by_long_name(expid, filename)
-    else:
-        uploadid = __get_upload_id(expid, filename)
-          
+        raise RuntimeError("No experiment opened or specified")
+
+    uploadid = (
+        __get_upload_id_by_long_name(expid, filename)
+        if filename_is_long_name
+        else __get_upload_id(expid, filename)
+    )
+
     if uploadid is None:
-        raise RuntimeError('File not found in eLabFTW experiment')
-    else:
-        # fetch file data
-        return uploads_api.read_upload(
-            'experiments', expid, uploadid, format='binary', 
-            _preload_content=False).data
+        raise RuntimeError("File not found in eLabFTW experiment")
 
-    
-def get_file_csv_data(filename: str, 
-                      filename_is_long_name: bool=False,
-                      header: bool=True, sep: str=',', 
-                      decimal: str='.', thousands: str=None,
-                      datatype: str='np', expid: int=None):   
-    """Read and return data from a csv-like text file attached to 
-    an experiment stored in eLabFTW.
+    # Binary download: GET /{entity_type}/{id}/uploads/{subid}?format=binary :contentReference[oaicite:6]{index=6}
+    r = _request(
+        "GET",
+        f"/experiments/{expid}/uploads/{uploadid}",
+        params={"format": "binary"},
+        stream=True,
+    )
+    return r.content
 
-    Parameters
-    ----------
-    filename : str
-        The filename of the file to be read from the experiment.
-    filename_is_long_name: bool
-        The value of filename is the long_name stored used in eLabFTW.
-        The default is False.
-    header : bool, optional
-        If True, the first table row contains the column names, which
-        are used as headings for the pandas dataframe. 
-        The default is True.
-    sep : str, optional
-        The column separator used in the file.
-        The default is ','.
-    decimal: str, optional
-        Character representing the decimal point.
-        The default is '.'.
-    thousands: str, optional
-        Character used to parse thousands.
-        If None, ',' or '.' is used if decimal is '.' or ',', respectively.
-        The default is None.
-    datatype : str, optional
-        'df': return a pandas dataframe,
-        'np': return a dictionary of numpy arrays for each column. 
-        The default is 'np'.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
 
-    Returns
-    -------
-    pandas.dataframe or dictionary
-        Return type depends on the parameter datatype (see above).
+def get_file_csv_data(
+    filename: str,
+    filename_is_long_name: bool = False,
+    header: bool = True,
+    sep: str = ",",
+    decimal: str = ".",
+    thousands: str = None,
+    datatype: str = "np",
+    expid: int = None,
+):
+    filedata = get_file_data(filename, filename_is_long_name, expid).decode("utf-8")
 
-    """
-
-    # fetch file data
-    filedata = get_file_data(filename, filename_is_long_name, expid).decode('utf-8')
-
-    # extract data
     if thousands is None:
-        thousands = '.' if decimal==',' else ','
-    df = pd.read_csv(StringIO(filedata), sep=sep, 
-                     header=(0 if header else 'infer'),
-                     decimal=decimal, thousands=thousands)
+        thousands = "." if decimal == "," else ","
 
-    # return result
-    if datatype == 'df':
+    df = pd.read_csv(
+        StringIO(filedata),
+        sep=sep,
+        header=(0 if header else "infer"),
+        decimal=decimal,
+        thousands=thousands,
+    )
+
+    if datatype == "df":
         return df
-    elif datatype == 'np':
+    if datatype == "np":
         return __conv_df_to_np(df)
-    else:
-        raise RuntimeError('Wrong datatype')
+    raise RuntimeError("Wrong datatype")
 
-            
-def get_file_hdf5_data(filename: str, filename_is_long_name: bool=False, expid: int=None):   
-    """Read and return data from a hdf5 file attached to 
-    an experiment stored in eLabFTW.
 
-    Parameters
-    ----------
-    filename : str
-        The filename of the file to be read from the experiment.
-    filename_is_long_name: bool
-        The value of filename is the long_name stored used in eLabFTW.
-        The default is False.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-
-    Returns
-    -------
-    h5py file object
-        Returns a file object as created by h5py.File.
-
-    """
-
-    # fetch file data
+def get_file_hdf5_data(filename: str, filename_is_long_name: bool = False, expid: int = None):
     filestream = BytesIO(get_file_data(filename, filename_is_long_name, expid))
-
-    # open and return hdf5
-    return h5py.File(filestream, 'r')
+    return h5py.File(filestream, "r")
 
 
-### Update experiment data ###
+# -----------------------
+# Update experiment data
+# -----------------------
 
-
-def create_extrafield(fieldname: str, value, fieldtype: str='text',
-                      unit: str=None, units=None, description: str=None,
-                      groupname: str=None,
-                      readonly: bool=False, required: bool=False,
-                      expid: int=None):
-    """Create an extra field in an experiment.
-
-    Parameters
-    ----------
-    fieldname : str
-        The fieldname of the entry.
-    value :
-        The value of the entry.
-    fieldtype : str
-        The type of the field. Possible values: text, number, date, time, datetime-local.
-        The default is 'text'.
-    unit : str
-        The unit of the quantity.
-        The default is None.
-    description : str
-        The description of the entry.
-        The default is None.
-    readonly : bool
-        Make the field readonly.
-        The default is False.
-    required : bool
-        Make the field required.
-        The default is False.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-
-    Returns
-    -------
-    None.
-
-    """
-
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-    
+def create_extrafield(
+    fieldname: str,
+    value,
+    fieldtype: str = "text",
+    unit: str = None,
+    units=None,
+    description: str = None,
+    groupname: str = None,
+    readonly: bool = False,
+    required: bool = False,
+    expid: int = None,
+):
     if expid is None:
         global __EXPID__
         expid = __EXPID__
-
     if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-   
-    # fetch experiment
-    exp = exp_api.get_experiment(expid)
-    if exp.metadata is None:
-        # no metadata yet, then create it
-        metadata = {'extra_fields': {}}
+        raise RuntimeError("No experiment opened or specified")
+
+    exp = get_experimentdata(expid)
+    if exp.get("metadata") is None:
+        metadata = {"extra_fields": {}}
     else:
-        metadata = json.loads(exp.metadata)
-        if 'extra_fields' not in metadata.keys():
-            metadata['extra_fields'] = {}
-    
-    # check if fieldname already exists
-    if fieldname in metadata['extra_fields'].keys():
+        metadata = json.loads(exp["metadata"])
+        metadata.setdefault("extra_fields", {})
+
+    if fieldname in metadata["extra_fields"]:
         update_extrafield(fieldname, value, expid)
         return
-    
+
+    groupid = None
     if groupname is not None:
-        # no elabftw or extra_fields_groups entries, then create them
-        if 'elabftw' not in metadata.keys():
-            metadata['elabftw'] = {}
-        if 'extra_fields_groups' not in metadata['elabftw'].keys():
-            metadata['elabftw']['extra_fields_groups'] = []
-        
-        # check if group already exists
-        groupid = [group['id'] for group in metadata['elabftw']['extra_fields_groups'] 
-                   if group['name']==groupname]
-        groupid = groupid[0] if len(groupid)>0 else None
+        metadata.setdefault("elabftw", {})
+        metadata["elabftw"].setdefault("extra_fields_groups", [])
+        groups = metadata["elabftw"]["extra_fields_groups"]
 
-        # create group if not yet existing
+        existing = [g["id"] for g in groups if g.get("name") == groupname]
+        groupid = existing[0] if existing else None
+
         if groupid is None:
-            if len(metadata['elabftw']['extra_fields_groups']) > 0:
-                groupid = max([group['id'] for group in metadata['elabftw']['extra_fields_groups']]) + 1
-            else:
-                groupid = 1
-            metadata['elabftw']['extra_fields_groups'].append({'id': groupid, 'name': groupname})
-    
-    # create field
-    if fieldtype == 'datetime':
-        fieldtype = 'datetime-local'
-    metadata['extra_fields'][fieldname] = {'type': fieldtype}
+            groupid = (max([g["id"] for g in groups]) + 1) if groups else 1
+            groups.append({"id": groupid, "name": groupname})
 
-    if type(value) != str:
-        if fieldtype == 'number':
+    if fieldtype == "datetime":
+        fieldtype = "datetime-local"
+
+    metadata["extra_fields"][fieldname] = {"type": fieldtype}
+
+    if not isinstance(value, str):
+        if fieldtype == "number":
             value = str(value)
-        if fieldtype == 'datetime-local':
+        elif fieldtype == "datetime-local":
             value = datetime.isoformat(value.replace(second=0, microsecond=0))
-        if fieldtype == 'date':
+        elif fieldtype == "date":
             value = dt_date.isoformat(value)
-        if fieldtype == 'time':
+        elif fieldtype == "time":
             value = dt_time.isoformat(value.replace(second=0, microsecond=0))
 
-    metadata['extra_fields'][fieldname]['value'] = value
-    
+    metadata["extra_fields"][fieldname]["value"] = value
+
     if unit is not None:
-        metadata['extra_fields'][fieldname]['unit'] = unit
+        metadata["extra_fields"][fieldname]["unit"] = unit
         if units is None:
             units = [unit]
     if units is not None:
-        metadata['extra_fields'][fieldname]['units'] = units
+        metadata["extra_fields"][fieldname]["units"] = units
     if description is not None:
-        metadata['extra_fields'][fieldname]['description'] = description
-    if groupname is not None:
-        metadata['extra_fields'][fieldname]['group_id'] = groupid
+        metadata["extra_fields"][fieldname]["description"] = description
+    if groupid is not None:
+        metadata["extra_fields"][fieldname]["group_id"] = groupid
     if readonly:
-        metadata['extra_fields'][fieldname]['readonly'] = True
+        metadata["extra_fields"][fieldname]["readonly"] = True
     if required:
-        metadata['extra_fields'][fieldname]['required'] = True
+        metadata["extra_fields"][fieldname]["required"] = True
 
-    # save to elabftw
-    exp_api.patch_experiment(expid, body={'metadata': json.dumps(metadata)})
+    # PATCH /experiments/{id} with {"metadata": "<json string>"} :contentReference[oaicite:7]{index=7}
+    _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
 
 
-def update_extrafield(fieldname: str, value, expid: int=None):
-    """Update the value of an extra field of an experiment.
-
-    Parameters
-    ----------
-    fieldname : str
-        The fieldname of the entry.
-    value
-        The value of the entry.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-
-    Returns
-    -------
-    None.
-
-    """
-
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-    
+def update_extrafield(fieldname: str, value, expid: int = None):
     if expid is None:
         global __EXPID__
         expid = __EXPID__
-
     if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-        
-    if type(value) != str:
-        # fetch type of metadatafield
-        exp = exp_api.get_experiment(expid)
-        metadata = json.loads(exp.metadata)
-        fieldtype = metadata['extra_fields'][fieldname]['type']
+        raise RuntimeError("No experiment opened or specified")
 
-        if fieldtype == 'number':
+    if not isinstance(value, str):
+        exp = get_experimentdata(expid)
+        metadata = json.loads(exp.get("metadata") or "{}")
+        fieldtype = metadata["extra_fields"][fieldname]["type"]
+
+        if fieldtype == "number":
             value = str(value)
-        if fieldtype == 'datetime-local':
+        elif fieldtype == "datetime-local":
             value = datetime.isoformat(value.replace(second=0, microsecond=0))
-        if fieldtype == 'date':
+        elif fieldtype == "date":
             value = dt_date.isoformat(value)
-        if fieldtype == 'time':
+        elif fieldtype == "time":
             value = dt_time.isoformat(value.replace(second=0, microsecond=0))
-        
-    exp_api.patch_experiment(expid, body={'action': 'updatemetadatafield', fieldname: value})
 
-    
-def delete_extrafield(fieldname: str, expid: int=None):
-    """Delete an extra field in an experiment.
+    # Same behavior as elabapi_python: PATCH with action "updatemetadatafield"
+    _patch_json(f"/experiments/{expid}", {"action": "updatemetadatafield", fieldname: value})
 
-    Parameters
-    ----------
-    fieldname : str
-        The fieldname of the entry.
-    expid : int, optional
-        The id of the experiment in eLabFTW to be read.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
 
-    Returns
-    -------
-    None.
-
-    """
-
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_api = elabapi_python.ExperimentsApi(__APICLIENT__)
-    
+def delete_extrafield(fieldname: str, expid: int = None):
     if expid is None:
         global __EXPID__
         expid = __EXPID__
-
     if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-   
-    # fetch experiment
-    exp = exp_api.get_experiment(expid)
-    metadata = json.loads(exp.metadata)
-      
-    del metadata['extra_fields'][fieldname]
+        raise RuntimeError("No experiment opened or specified")
 
-    # save to elabftw
-    exp_api.patch_experiment(expid, body={'metadata': json.dumps(metadata)})
-    
-    
-### Upload files ###
+    exp = get_experimentdata(expid)
+    metadata = json.loads(exp.get("metadata") or "{}")
+    if "extra_fields" in metadata and fieldname in metadata["extra_fields"]:
+        del metadata["extra_fields"][fieldname]
 
-        
-def upload_file(file: str, comment: str,
-                replacefile: bool=True, expid: int=None):
-    """Upload an excisting file to an experiment on eLabFTW
-    
-    Parameters
-    ----------
-    file : str
-        The name and path of the file to be uploaded.
-    comment : str
-        A comment decribing the file.
-    replacefile : bool, optional
-        If True, an existing file with the same name will be overwritten.
-        The default is True.
-    expid : int, optional
-        The id of the experiment in eLabFTW into which the file
-        should be uploaded.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
+    _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
 
-    Returns
-    -------
-    None.
 
-    """
+# -----------------------
+# Upload files
+# -----------------------
 
-    global __APICLIENT__
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    uploads_api = elabapi_python.UploadsApi(__APICLIENT__)
-
+def upload_file(file: str, comment: str, replacefile: bool = True, expid: int = None):
     if expid is None:
         global __EXPID__
         expid = __EXPID__
-
     if expid is None:
-        raise RuntimeError('No experiment opened or specified')
-    
-    if replacefile:
-        uploadid = __get_upload_id(expid, os.path.basename(file))
-    else:
-        uploadid = None
-        
-    if uploadid is None:
-        uploads_api.post_upload('experiments', expid, 
-                                file=file, comment=comment)
-    else:
-        uploads_api.post_upload_replace('experiments', expid, uploadid,
-                                        file=file, comment=comment)
+        raise RuntimeError("No experiment opened or specified")
+
+    uploadid = __get_upload_id(expid, os.path.basename(file)) if replacefile else None
+
+    with open(file, "rb") as fh:
+        files = {"file": fh}
+        data = {"comment": comment}
+
+        if uploadid is None:
+            # POST /experiments/{id}/uploads :contentReference[oaicite:8]{index=8}
+            _request("POST", f"/experiments/{expid}/uploads", data=data, files=files)
+        else:
+            # Replace: POST /experiments/{id}/uploads/{subid} :contentReference[oaicite:9]{index=9}
+            _request("POST", f"/experiments/{expid}/uploads/{uploadid}", data=data, files=files)
 
 
-def upload_image_from_figure(fig: Figure, filename: str, comment: str,
-                             replacefile: bool=True,
-                             format: str='png', dpi='figure',
-                             bbox_inches='tight',
-                             expid: int=None):
-    """Generate image from matplotlib figure and upload it to
-    an experiment on eLabFTW
-    
-    Parameters
-    ----------
-    fig : matplotlib.figure.Figure
-        The matplotlib figure.
-    filename : str
-        The filename without extension.
-    comment : str
-        A comment decribing the figure.
-    replacefile : bool, optional
-        If True, an existing file with the same name will be overwritten.
-        The default is True.
-    format : str, optional
-        The image file format. 
-        The default is 'png'.
-    dpi : optional
-        The resolution of the image as defined in matplotlib's savefig().
-        The default is 'figure'.
-    expid : int, optional
-        The id of the experiment in eLabFTW into which the image
-        should be uploaded.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-
-    Returns
-    -------
-    None.
-
-    """
-
-    # create a temporary directory for the image, create it and upload
+def upload_image_from_figure(
+    fig: Figure,
+    filename: str,
+    comment: str,
+    replacefile: bool = True,
+    format: str = "png",
+    dpi="figure",
+    bbox_inches="tight",
+    expid: int = None,
+):
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpfile = os.path.join(tmpdir, 
-                               Path(filename).with_suffix('.' + format))
-        fig.savefig(tmpfile, format=format, facecolor='white', dpi=dpi,
-                    bbox_inches=bbox_inches)
+        tmpfile = os.path.join(tmpdir, Path(filename).with_suffix("." + format))
+        fig.savefig(tmpfile, format=format, facecolor="white", dpi=dpi, bbox_inches=bbox_inches)
         upload_file(tmpfile, comment, replacefile, expid=expid)
-        
-        
-def upload_csv_data(data, filename: str, comment: str,
-                    replacefile: bool=True, index: bool=False,
-                    expid: int=None):
-    """Generate a csv file from a pandas dataframe or a dictionary of
-    numpy arrays (column data) and upload it to an experiment on eLabFTW
-    
-    Parameters
-    ----------
-    data :
-        The data to be stored. This can be either a pandas.DataFrame or
-        a dictionary of 1-dimensional numpy arrays representing column
-        data; in the latter case, the dictionary will be converted into
-        a dataframe before creating the csv file.
-    filename : str
-        The filename with extension (e.g. .txt).
-    comment : str
-        A comment decribing the file.
-    replacefile : bool, optional
-        If True, an existing file with the same name will be overwritten.
-        The default is True.
-    index : bool, optional
-        If True, write also dataframe row names (index) to file.
-        The default is False.
-    expid : int, optional
-        The id of the experiment in eLabFTW into which the file
-        should be uploaded.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
 
-    Returns
-    -------
-    None.
 
-    """
-
-    # if data is not a dataframe, try to convert data to dataframe
+def upload_csv_data(
+    data,
+    filename: str,
+    comment: str,
+    replacefile: bool = True,
+    index: bool = False,
+    expid: int = None,
+):
     if isinstance(data, pd.DataFrame):
         df = data
     else:
         df = pd.DataFrame(data)
 
-    # create a temporary directory for the file, create it and upload
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpfile = os.path.join(tmpdir, filename)
         df.to_csv(tmpfile, index=index)
         upload_file(tmpfile, comment, replacefile, expid=expid)
-    
-    
-async def _callback_savenotebook():
-    await __APP__.ready()
-
-    # save current notebook
-    print('Saving file ...')
-    __APP__.commands.execute('docmanager:save')
 
 
-async def _callback_upload(comment: str, replacefile: bool, expid: int):
-    await __APP__.ready()
+# -----------------------
+# Jupyter notebook upload
+# -----------------------
 
-    # get filename of the current notebook
-    file = os.path.join(os.getcwd(), __APP__.sessions.current_session['name'])
-    print(file)
-    # upload to elabftw
-    print('Uploading to eLabFTW ...')
-    upload_file(file, comment, replacefile, expid=expid)
-    print('Done.')
+def _kernel_id_from_connection_file() -> str:
+    import ipykernel
+    cf = ipykernel.get_connection_file()
+    m = re.search(r"kernel-(.+)\.json$", cf)
+    if not m:
+        raise RuntimeError(f"Cannot parse kernel id from connection file: {cf}")
+    return m.group(1)
 
+def _list_running_servers():
+    try:
+        from jupyter_server.serverapp import list_running_servers
+        return list(list_running_servers())
+    except Exception:
+        from notebook.notebookapp import list_running_servers
+        return list(list_running_servers())
 
-def upload_this_jupyternotebook(comment: str, replacefile: bool=True,
-                                expid: int=None):
-    """Saves and uploads the current jupyter notebook
-    to an experiment on eLabFTW
-    
-    Parameters
-    ----------
-    comment : str
-        A comment decribing the jupyter notebook.
-    replacefile : bool, optional
-        If True, an existing file with the same name will be overwritten.
-        The default is True.
-    expid : int, optional
-        The id of the experiment in eLabFTW into which the jupyter notebook
-        should be uploaded.
-        If None, the experiment specified by open_experiment() is used.
-        The default is None.
-        
-    Returns
-    -------
-    None.
+def _find_notebook_path_via_sessions() -> Path:
+    kid = _kernel_id_from_connection_file()
+    servers = _list_running_servers()
+    if not servers:
+        raise RuntimeError("No running Jupyter servers found via list_running_servers().")
 
+    last_err = None
+    for s in servers:
+        url = (s.get("url") or "").rstrip("/")
+        token = s.get("token") or ""
+        nbdir = s.get("notebook_dir") or s.get("root_dir") or ""
+
+        sessions_url = f"{url}/api/sessions"
+        params = {"token": token} if token else {}
+
+        try:
+            r = requests.get(sessions_url, params=params, timeout=(5, 20))
+            if r.status_code != 200:
+                last_err = f"{sessions_url} -> {r.status_code}: {r.text[:200]}"
+                continue
+            sessions = r.json()
+        except Exception as e:
+            last_err = repr(e)
+            continue
+
+        for sess in sessions:
+            k = (sess.get("kernel") or {})
+            if k.get("id") == kid:
+                path = sess.get("path") or (sess.get("notebook") or {}).get("path")
+                if not path:
+                    raise RuntimeError("Matched session but could not find notebook path in session JSON.")
+                return (Path(nbdir) / Path(path)).resolve()
+
+    raise RuntimeError(f"Could not locate current notebook via /api/sessions. Last error: {last_err}")
+
+def upload_this_jupyternotebook(
+    comment: str,
+    replacefile: bool = True,
+    expid: int = None,
+    warn_if_older_than_s: int = 20,
+):
     """
+    Upload current notebook file as it exists on disk.
+    User should save (Ctrl+S) before calling to include latest changes.
+    """
+    if expid is None:
+        global __EXPID__
+        expid = __EXPID__
+    if expid is None:
+        raise RuntimeError("No experiment opened or specified")
 
-    # start async tasks to save and upload notebook
-    asyncio.gather(_callback_savenotebook(), 
-                   _callback_upload(comment, replacefile, expid))
+    nb_path = _find_notebook_path_via_sessions()
+    if not nb_path.exists():
+        raise FileNotFoundError(f"Notebook file not found on disk: {nb_path}")
 
+    st = nb_path.stat()
+    age_s = time.time() - st.st_mtime
+
+    if age_s > warn_if_older_than_s:
+        print(
+            f"[elab] Warning: Notebook on disk was last modified {age_s:.1f}s ago.\n"
+            f"       If you changed cells recently, press Ctrl+S first to save, then upload again."
+        )
+
+    print(f"[elab] Uploading notebook from disk: {nb_path}")
+    upload_file(str(nb_path), comment, replacefile, expid=expid)
+    print("[elab] Done.")
+    
