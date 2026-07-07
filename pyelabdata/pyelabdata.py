@@ -469,6 +469,7 @@ def create_extrafield(
     groupname: str = None,
     readonly: bool = False,
     required: bool = False,
+    position: int = None,
     expid: int = None,
 ):
     if expid is None:
@@ -532,6 +533,8 @@ def create_extrafield(
         metadata["extra_fields"][fieldname]["readonly"] = True
     if required:
         metadata["extra_fields"][fieldname]["required"] = True
+    if position is not None:
+        metadata["extra_fields"][fieldname]["position"] = position
 
     # PATCH /experiments/{id} with {"metadata": "<json string>"} :contentReference[oaicite:7]{index=7}
     _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
@@ -576,6 +579,33 @@ def delete_extrafield(fieldname: str, expid: int = None):
 
     _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
 
+def replace_experiment_metadata(metadata: dict, expid: int=None):
+    """Update the metadata of an experiment.
+
+    Parameters
+    ----------
+    metadata : str
+        A JSON based metadata entry following a special schema in eLabFTW.
+    expid : int, optional
+        The id of the experiment in eLabFTW to be read.
+        If None, the experiment specified by open_experiment() or create_experiment() is used.
+        The default is None.
+
+    Returns
+    -------
+    None.
+
+    """
+
+    if expid is None:
+        global __EXPID__
+        expid = __EXPID__
+    if expid is None:
+        raise RuntimeError("No experiment opened or specified")
+        
+    if type(metadata) == dict:
+        # patch the experiment
+        _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
 
 # -----------------------
 # Upload files
