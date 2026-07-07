@@ -1,3 +1,51 @@
+# -*- coding: utf-8 -*-
+# MIT License
+# 
+# Copyright (c) 2025-02-26 Michael Krieger (lapmk) https://github.com/FAU-PHYSIK-EP/pyelabdata
+# based on Michael Krieger (lapmk): https://github.com/FAU-PHYSIK-EP/pyelabdata/blob/main/pyelabdata/pyelabdata.py
+# with licence "MIT License": https://github.com/FAU-PHYSIK-EP/pyelabdata/blob/main/LICENSE
+# 
+# 
+# File: pyelabdata.py
+# Author: Ron Dockhorn
+# Date: 2026-07-07
+# Description: A simple wrapper of the elabapi_python package.
+# 
+# Version: 0.3.1
+# Modified: 2026-07-07
+# 
+# Changes:
+# - added "get_info()"
+
+"""
+  A simple wrapper of the elabapi_python package (https://github.com/elabftw/elabapi-python)
+  based on Michael Krieger's "pyelabdata.py" (2025-02-21) ,see https://github.com/FAU-PHYSIK-EP/pyelabdata/blob/main/pyelabdata/pyelabdata.py
+  with "MIT License": https://github.com/FAU-PHYSIK-EP/pyelabdata/blob/main/LICENSE
+  This version is also released under "MIT License" 
+  Mostly the wrapper adds and redefines the following features for eLabFTW (5.3.11):
+    - creation of experiments
+    - creation of metadata (modified grouping and standard)
+  
+  Attributes:
+    None
+
+  Methods:
+  connect(host, apikey, verify_ssl) -- connect to server instance
+  disconnect() -- disconnect from server
+  get_teamid() -- return the team id of provided apikey
+  list_experiments(searchstring, tags, only_current_team, list_keys) -- provides a list of all experiments which are accessible with the apikey
+  create_experiment() --  creates an experiment on server
+  open_experiment(expid, returndata) -- access an already existing experiment
+  close_experiment() -- close the connection to experiment 
+  get_info() -- return the public accessible info page
+  get_experimentdata(expid) -- provides access to the record of an experiment
+  get_maintext(format, expid) -- provides access to the general description (html body) of an 
+  update_experiment_title(title, expid) -- overwrites the title of an experiment
+  update_experiment_metadata(metadata, expid) -- overwrites the metadata of an experiment
+  upload_file(file, comment, replacefile, expid) -- upload of a file to the server
+  upload_this_jupyternotebook(comment, replacefile, expid) -- self-contained upload of the jupyter notebook to server
+"""
+
 import numpy as np
 import pandas as pd
 import json
@@ -162,6 +210,7 @@ def list_experiments(
     # exps = _request("GET", "/experiments", params=params).json()
 
     teamid = get_teamid()
+    print(teamid)
     explist = []
     for exp in exps:
         if (int(exp.get("team", -1)) == teamid) or (not only_current_team):
@@ -186,6 +235,30 @@ def close_experiment():
     global __EXPID__
     __EXPID__ = None
 
+### Get Info about eLabFTW ###    
+def get_info():
+    """Return the info page
+    stored in eLabFTW.
+    
+    Parameters
+    ----------
+        
+
+    Returns
+    -------
+    dictionary
+        Returns the info page
+
+    """
+
+#     global __APICLIENT__
+#     if __APICLIENT__ is None:
+#         raise RuntimeError('Not connected to eLabFTW server')
+#     
+#     info_api = elabapi_python.InfoApi(__APICLIENT__)
+    
+    # fetch info
+    return _get_json(f"/info")
 
 # -----------------------
 # Read experiment data
