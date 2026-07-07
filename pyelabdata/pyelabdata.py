@@ -156,6 +156,24 @@ def _patch_json(path: str, body: Dict[str, Any]) -> Any:
         return None
     return r.json()
 
+def _post_json(path: str, body: Dict[str, Any], *, params: Optional[Dict[str, Any]] = None) -> Tuple[Any, int, Dict[str, Any]]:
+    r = _request("POST", path, params=params, json_body=body, stream=False)
+
+    status_code = r.status_code
+    headers = dict(r.headers)
+
+    if status_code == 204:
+        return None, status_code, headers
+
+    # empty / whitespace body
+    if not r.text or not r.text.strip():
+        return None, status_code, headers
+
+    # JSON body (if any)
+    try:
+        return r.json(), status_code, headers
+    except ValueError:
+        raise RuntimeError(f"Non-JSON response ({status_code}): {r.text[:500]}")
 
 # -----------------------
 # General functions
@@ -238,42 +256,38 @@ def close_experiment():
     global __EXPID__
     __EXPID__ = None
     
-def create_experiment():
-    """Creates an experiment on eLabFTW.
-    This experiment id will be used for all subsequent commands 
-    (unless otherwise specified.)
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    The experiment id associated with the newly created experiment
-
+def create_experiment(title="Untitled", body="", content_type=2):
     """
-
+    Create an experiment on eLabFTW and return its id.
+    """
     global __EXPID__
     
-    if __APICLIENT__ is None:
-        raise RuntimeError('Not connected to eLabFTW server')
-    exp_client = elabapi_python.ExperimentsApi(__APICLIENT__)
+    # Build request payload according to API v2 docs
+    payload = {
+        "title": title,
+        "body": body,
+        "content_type": content_type,  # 1 (html) / 2 (MarkDown) depending on your instance mapping
+    }
+
+    response, status_code, headers = _post_json(f"/experiments", body=payload)
     
-    # This method returns a tuple with 3 components, so we assign them to 3 variables
-    response_data, status_code, headers = exp_client.post_experiment_with_http_info()
-    # the Location response header will point to the newly created entry
-    location = headers.get('Location')
     
-    # extract the ID as an integer from the Location string: it is simply the last part of the URL
-    exp_id = int(location.split('/').pop())
-    # A status code of 201 means the entry was created
-    if status_code == 201:
-        print(f"[*] We created an experiment. The status code is {status_code} and the experiment is at: {location} with id: {exp_id}")
+    if status_code in (200, 201):
+        location = headers.get("Location") or headers.get("location")
+        if not location:
+            # sometimes id is returned in JSON
+            if isinstance(response, dict) and "id" in response:
+                exp_id = int(response["id"])
+            else:
+                raise RuntimeError(f"Created experiment but no Location header and no id in response: {response!r}")
+        else:
+            exp_id = int(location.rstrip("/").split("/")[-1])
+
+        print(f"[*] We created an experiment. status={status_code} id={exp_id}")
         __EXPID__ = exp_id
         return exp_id
-    else: 
-        raise RuntimeError('Unknown error: Could not create experiment')
 
+    raise RuntimeError(f"Could not create experiment (status={status_code}). Response: {response!r}")
 
 # --------------------------------
 # Get Info about eLabFTW 
