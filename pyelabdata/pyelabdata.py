@@ -237,8 +237,47 @@ def open_experiment(expid: int, returndata: bool = False):
 def close_experiment():
     global __EXPID__
     __EXPID__ = None
+    
+def create_experiment():
+    """Creates an experiment on eLabFTW.
+    This experiment id will be used for all subsequent commands 
+    (unless otherwise specified.)
 
-### Get Info about eLabFTW ###    
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    The experiment id associated with the newly created experiment
+
+    """
+
+    global __EXPID__
+    
+    if __APICLIENT__ is None:
+        raise RuntimeError('Not connected to eLabFTW server')
+    exp_client = elabapi_python.ExperimentsApi(__APICLIENT__)
+    
+    # This method returns a tuple with 3 components, so we assign them to 3 variables
+    response_data, status_code, headers = exp_client.post_experiment_with_http_info()
+    # the Location response header will point to the newly created entry
+    location = headers.get('Location')
+    
+    # extract the ID as an integer from the Location string: it is simply the last part of the URL
+    exp_id = int(location.split('/').pop())
+    # A status code of 201 means the entry was created
+    if status_code == 201:
+        print(f"[*] We created an experiment. The status code is {status_code} and the experiment is at: {location} with id: {exp_id}")
+        __EXPID__ = exp_id
+        return exp_id
+    else: 
+        raise RuntimeError('Unknown error: Could not create experiment')
+
+
+# --------------------------------
+# Get Info about eLabFTW 
+# --------------------------------
 def get_info():
     """Return the info page
     stored in eLabFTW.
