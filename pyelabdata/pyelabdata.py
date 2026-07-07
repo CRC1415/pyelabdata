@@ -39,9 +39,12 @@
   close_experiment() -- close the connection to experiment 
   get_info() -- return the public accessible info page
   get_experimentdata(expid) -- provides access to the record of an experiment
-  get_maintext(format, expid) -- provides access to the general description (html body) of an 
+  get_maintext(format, expid) -- provides access to the general description (html body) of an experiment
+  create_extrafield - creates an specific metadata field of an experiment
+  update_extrafield - overwrites an specific metadata field of an experiment
+  delete_extrafield - removes an specific metadata field of an experiment
   update_experiment_title(title, expid) -- overwrites the title of an experiment
-  update_experiment_metadata(metadata, expid) -- overwrites the metadata of an experiment
+  replace_experiment_metadata(metadata, expid) -- overwrites the metadata of an experiment
   upload_file(file, comment, replacefile, expid) -- upload of a file to the server
   upload_this_jupyternotebook(comment, replacefile, expid) -- self-contained upload of the jupyter notebook to server
 """
@@ -470,6 +473,7 @@ def create_extrafield(
     readonly: bool = False,
     required: bool = False,
     position: int = None,
+    options: list = None,
     expid: int = None,
 ):
     if expid is None:
@@ -535,7 +539,14 @@ def create_extrafield(
         metadata["extra_fields"][fieldname]["required"] = True
     if position is not None:
         metadata["extra_fields"][fieldname]["position"] = position
-
+    
+    if fieldtype == "select":
+        options = options or []
+        if value not in options:
+            options.append(value)
+        metadata["extra_fields"][fieldname]["options"] = options
+    
+    
     # PATCH /experiments/{id} with {"metadata": "<json string>"} :contentReference[oaicite:7]{index=7}
     _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
 
