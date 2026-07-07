@@ -431,6 +431,34 @@ def get_file_hdf5_data(filename: str, filename_is_long_name: bool = False, expid
 # Update experiment data
 # -----------------------
 
+def update_experiment_title(title: str, expid: int=None):
+    """Update the title of an experiment.
+
+    Parameters
+    ----------
+    title : str
+        The new title name of the experiment.
+    expid : int, optional
+        The id of the experiment in eLabFTW to be read.
+        If None, the experiment specified by open_experiment() or create_experiment() is used.
+        The default is None.
+
+    Returns
+    -------
+    None.
+
+    """
+    if expid is None:
+        global __EXPID__
+        expid = __EXPID__
+
+    if expid is None:
+        raise RuntimeError('No experiment opened or specified')
+        
+    if type(title) == str:
+        # patch the experiment
+        _patch_json(f"/experiments/{expid}", body={"title": title})
+
 def create_extrafield(
     fieldname: str,
     value,
