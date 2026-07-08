@@ -572,6 +572,15 @@ def create_extrafield(
     if position is not None:
         metadata["extra_fields"][fieldname]["position"] = position
     
+    if fieldtype == "checkbox":
+        if isinstance(value, str):
+            if value not in ("on", "off"):
+                raise ValueError("checkbox value must be 'on' or 'off'")
+        else:
+            raise ValueError("checkbox value must be a string 'on' or 'off'")
+
+    metadata["extra_fields"][fieldname]["value"] = value
+
     if fieldtype == "select":
         options = options or []
         if value not in options:
