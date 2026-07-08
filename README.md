@@ -27,7 +27,7 @@ Disconnect from the eLabFTW server.
 ```python
 def get_info():
 ```
-Return the info page of about the instance.
+Return the info page about the instance.
 
 ```python
 def get_teamid():
