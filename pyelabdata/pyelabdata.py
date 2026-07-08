@@ -488,10 +488,11 @@ def update_experiment_title(title: str, expid: int=None):
 
     if expid is None:
         raise RuntimeError('No experiment opened or specified')
-        
-    if type(title) == str:
-        # patch the experiment
-        _patch_json(f"/experiments/{expid}", body={"title": title})
+
+    if not isinstance(title, str):
+        raise TypeError("title must be a str")
+    _patch_json(f"/experiments/{expid}", body={"title": title})
+    
 
 def create_extrafield(
     fieldname: str,
