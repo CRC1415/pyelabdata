@@ -282,7 +282,6 @@ def create_experiment(title="Untitled", body="", content_type=2):
         else:
             exp_id = int(location.rstrip("/").split("/")[-1])
 
-        print(f"[*] We created an experiment. status={status_code} id={exp_id}")
         __EXPID__ = exp_id
         return exp_id
 
