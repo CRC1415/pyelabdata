@@ -627,7 +627,7 @@ def replace_experiment_metadata(metadata: dict, expid: int=None):
 
     Parameters
     ----------
-    metadata : str
+    metadata : dict
         A JSON based metadata entry following a special schema in eLabFTW.
     expid : int, optional
         The id of the experiment in eLabFTW to be read.
