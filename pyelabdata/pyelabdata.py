@@ -291,28 +291,8 @@ def create_experiment(title="Untitled", body="", content_type=2):
 # Get Info about eLabFTW 
 # --------------------------------
 def get_info():
-    """Return the info page
-    stored in eLabFTW.
-    
-    Parameters
-    ----------
-        
-
-    Returns
-    -------
-    dictionary
-        Returns the info page
-
-    """
-
-#     global __APICLIENT__
-#     if __APICLIENT__ is None:
-#         raise RuntimeError('Not connected to eLabFTW server')
-#     
-#     info_api = elabapi_python.InfoApi(__APICLIENT__)
-    
-    # fetch info
-    return _get_json(f"/info")
+     """Return the public info payload of the eLabFTW instance."""
+     return _get_json("/info")
 
 # -----------------------
 # Read experiment data
