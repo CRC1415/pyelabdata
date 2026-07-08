@@ -645,10 +645,10 @@ def replace_experiment_metadata(metadata: dict, expid: int=None):
         expid = __EXPID__
     if expid is None:
         raise RuntimeError("No experiment opened or specified")
-        
-    if type(metadata) == dict:
-        # patch the experiment
-        _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
+    
+    if not isinstance(metadata, dict):
+        raise TypeError("metadata must be a dict")
+    _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
 
 # -----------------------
 # Upload files
