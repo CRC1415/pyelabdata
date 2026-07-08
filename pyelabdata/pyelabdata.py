@@ -231,7 +231,6 @@ def list_experiments(
     # exps = _request("GET", "/experiments", params=params).json()
 
     teamid = get_teamid()
-    print(teamid)
     explist = []
     for exp in exps:
         if (int(exp.get("team", -1)) == teamid) or (not only_current_team):
