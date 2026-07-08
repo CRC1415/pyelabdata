@@ -46,7 +46,7 @@ experiments will be listed.
 ```python
 def create_experiment(title="Untitled", body="", content_type=2):
 ```
-Creates and open an empty experiment in eLabFTW returning the id of the entry. The `body` can be used to provide the main text of the experiment.
+Creates and opens an empty experiment in eLabFTW returning the id of the entry. The `body` can be used to provide the main text of the experiment.
 The `content_type` specifies the content type for main text: (1) HTML or (2) Markdown (default). All subsequent commands will operate on the opened experiment.
 
 ```python
