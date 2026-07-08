@@ -176,7 +176,8 @@ def create_extrafield(fieldname: str, value, fieldtype:str='text',
                       expid: int=None):
 ```
 Create a new extra field with the name `fieldname` of type `fieldtype`
-(possible values: text, number, date, time, datetime, selection, checkbox; the default type is `text`) containing the value of `value`. 
+(possible values: text, number, date, time, datetime, select, checkbox; the default type is `text`) containing the value of `value`,
+see also the [eLabFTW documentation](https://doc.elabftw.net/docs/usage/metadata#extra-fields-objects). 
 If the field already exists, only the value will be updated
 (all other parameters are ignored in this case).
 You can define a list of possible units in the
@@ -187,7 +188,7 @@ The `readonly` and `required` control the respective property of the
 extra field. The `position` adjusts the order of appearance in the group `groupname`.  
 Depending on `fieldtype`, `value` will automatically be converted
 to string using appropriate functions (e.g. datetime.isoformat).  
-In the case of `fieldtype='selection'`, the `options` provide a list of defined values; if `value` is not a member of `options` it will be added to the default list.
+In the case of `fieldtype='select'`, the `options` provide a list of defined values; if `value` is not a member of `options` it will be added to the default list.
 In the case of `fieldtype='checkbox'` the `value` must be either `on` or `off`.  
 The parameter `expid` is optional and has the same meaning as in
 `get_table_data()`.
