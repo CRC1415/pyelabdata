@@ -8,14 +8,23 @@
 # 
 # File: pyelabdata.py
 # Author: Ron Dockhorn
-# Date: 2026-07-07
+# Date: 2026-07-15
 # Description: A simple wrapper of the elabapi_python package.
 # 
 # Version: 0.3.1
 # Modified: 2026-07-07
 # 
 # Changes:
-# - added "get_info()"
+# + added "get_info()"
+#
+# Version: 0.3.2
+# Modified: 2026-07-15
+# 
+# Changes:
+# + added "get_steps()"
+# + added "create_step()"
+# + added "update_step()"
+# + added "delete_step()"
 
 """
   A simple wrapper of the elabapi_python package (https://github.com/elabftw/elabapi-python)
@@ -47,6 +56,10 @@
   replace_experiment_metadata(metadata, expid) -- overwrites the metadata of an experiment
   upload_file(file, comment, replacefile, expid) -- upload of a file to the server
   upload_this_jupyternotebook(comment, replacefile, expid) -- self-contained upload of the jupyter notebook to server
+  get_steps - provides a list of all steps which are associates with the experiment
+  create_step - creates a step within the experiment
+  update_step - updates a step of the experiment (title or finished flag)
+  delete_step - deletes a step of the experiment
 """
 
 import numpy as np
@@ -658,6 +671,154 @@ def replace_experiment_metadata(metadata: dict, expid: int=None):
     if not isinstance(metadata, dict):
         raise TypeError("metadata must be a dict")
     _patch_json(f"/experiments/{expid}", {"metadata": json.dumps(metadata)})
+
+def get_steps(expid: int = None) -> List[Dict[str, Any]]:
+    """Get all steps for an experiment.
+    
+    Parameters
+    ----------
+    expid : int, optional
+        The experiment ID. If None, uses the currently opened experiment.
+        
+    Returns
+    -------
+    list of dict
+        A list of step dictionaries containing step information
+        
+    Raises
+    ------
+    RuntimeError
+        If no experiment is opened or specified and no experiment ID is provided
+    """
+    if expid is None:
+        global __EXPID__
+        expid = __EXPID__
+    if expid is None:
+        raise RuntimeError("No experiment opened or specified")
+    return _get_json(f"/experiments/{expid}/steps")
+
+def create_step(expid: int = None, body: Optional[str] = None) -> int:
+    """Create a new step for an experiment.
+    
+    Parameters
+    ----------
+    expid : int, optional
+        The experiment ID (uses current if not specified)
+    body : str, optional
+        The body content for the new step
+        
+    Returns
+    -------
+    int
+        The ID of the newly created step
+        
+    Raises
+    ------
+    RuntimeError
+        If the step creation fails
+    ValueError
+        If body is not a string
+    """
+    if expid is None:
+        global __EXPID__
+        expid = __EXPID__
+    if expid is None:
+        raise RuntimeError("No experiment opened or specified")
+    
+    # Validate input
+    if not isinstance(body, str):
+        raise ValueError("body must be a string")
+    
+    payload = {
+        "body": body,
+    }
+    
+    response, status_code, headers = _post_json(f"/experiments/{expid}/steps", body=payload)                                                                                                                                           
+    if status_code in (200, 201):
+        location = headers.get("Location") or headers.get("location")
+        if not location:
+            # sometimes id is returned in JSON
+            if isinstance(response, dict) and "id" in response:
+                step_id = int(response["id"])
+                return step_id
+            else:
+                raise RuntimeError(f"Created step but no Location header and no id in response: {response!r}")
+        else:
+            step_id = int(location.rstrip("/").split("/")[-1])
+            return step_id
+    
+    raise RuntimeError(f"Could not create step (status={status_code}). Response: {response!r}")                                                                                                                                        
+
+def update_step(stepid: int, expid: int = None, body: Optional[str] = None, toggle_finished: Optional[bool] = None) -> Dict[str, Any]:
+    """Update an existing step.
+    
+    Parameters
+    ----------
+    stepid : int
+        The ID of the step to update
+    expid : int, optional
+        The experiment ID (uses current if not specified)
+    body : str, optional
+        New body content for the step
+    toggle_finished : bool, optional
+        Toggle the finished status of the step
+        
+    Returns
+    -------
+    dict
+        Status information about the update operation
+    """
+    if expid is None:
+        global __EXPID__
+        expid = __EXPID__
+    if expid is None:
+        raise RuntimeError("No experiment opened or specified")
+    
+    # Validate inputs
+    if not isinstance(stepid, int) or stepid <= 0:
+        raise ValueError("stepid must be a positive integer")
+    
+    if body is not None and not isinstance(body, str):
+        raise TypeError("body must be a string")
+    
+    if toggle_finished is not None and not isinstance(toggle_finished, bool):
+        raise TypeError("toggle_finished must be a boolean")
+    
+    responses: List[Any] = []
+    
+    if body is not None:
+        resp = _patch_json(f"/experiments/{expid}/steps/{stepid}", {"body": body})
+        responses.append({"type": "update", "response": resp})
+    if toggle_finished is not None:
+        # For finishing a step, we need to use the action parameter correctly
+        if toggle_finished:
+            resp = _patch_json(f"/experiments/{expid}/steps/{stepid}", {"action": "finish"})
+            responses.append({"type": "finish", "response": resp})
+    
+    return responses
+
+def delete_step(stepid: int, expid: int = None) -> None:
+    """Delete a step from an experiment.
+    
+    Parameters
+    ----------
+    stepid : int
+        The ID of the step to delete
+    expid : int, optional
+        The experiment ID. If None, uses the currently opened experiment.
+        
+    Raises
+    ------
+    RuntimeError
+        If no experiment is opened or specified and no experiment ID is provided
+    """
+    if expid is None:
+        global __EXPID__
+        expid = __EXPID__
+    if expid is None:
+        raise RuntimeError("No experiment opened or specified")
+    
+    _request("DELETE", f"/experiments/{expid}/steps/{stepid}")
 
 # -----------------------
 # Upload files

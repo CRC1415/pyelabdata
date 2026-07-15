@@ -301,3 +301,53 @@ file with the same filename will be replaced. Otherwise, a new attachment
 with the same filename will be created. 
 `expid` is an integer number which identifies the eLabFTW experiment; 
 if set to None, the currently opened experiment is used.
+
+
+### Experiment Steps
+
+```python
+def get_steps(expid: int=None):
+```
+Get all steps for an experiment.
+
+All parameters are optional.
+`expid` is an integer number which identifies the eLabFTW experiment; 
+if set to None, the currently opened experiment is used.
+
+The function returns a list of dictionaries containing the step data.
+
+```python
+def create_step(expid: int=None, body: str=""):
+```
+Create a new step for an experiment.
+
+All parameters are optional.
+`expid` is an integer number which identifies the eLabFTW experiment; 
+if set to None, the currently opened experiment is used.
+`body` is the body content for the new step.
+
+The function returns the ID of the newly created step.
+
+```python
+def update_step(stepid: int, expid: int=None, body: str=None, toggle_finished: bool=None):
+```
+Update an existing step.
+
+All parameters are optional except stepid.
+`stepid` is the ID of the step to update.
+`expid` is an integer number which identifies the eLabFTW experiment; 
+if set to None, the currently opened experiment is used.
+`body` is the new body content for the step (optional).
+`toggle_finished` is a boolean to toggle the finished status of the step from `on` to `off` and vice versa (optional).
+
+The function returns a dictionary with status information about the update operation.
+
+```python
+def delete_step(stepid: int, expid: int=None):
+```
+Delete a step from an experiment.
+
+All parameters are optional.
+`stepid` is the ID of the step to delete.
+`expid` is an integer number which identifies the eLabFTW experiment; 
+if set to None, the currently opened experiment is used.
